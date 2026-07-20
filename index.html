@@ -151,7 +151,10 @@
     <h1>🏥 Club MedvitalCo</h1>
     <div class="sub">Sistema de registro de Aportes · Asociación sin fines de lucro 💚</div>
   </div>
-  <div class="sub" id="fechaHoy"></div>
+  <div class="sub">
+    <span id="fechaHoy"></span>
+    <span id="estadoSyncHeader"></span>
+  </div>
 </header>
 
 <nav>
@@ -160,6 +163,7 @@
   <button data-tab="socios" onclick="irTab('socios')">👥 Socios</button>
   <button data-tab="reportes" onclick="irTab('reportes')">📊 Reportes</button>
   <button data-tab="historial" onclick="irTab('historial')">🧾 Historial</button>
+  <button data-tab="ajustes" onclick="irTab('ajustes')">⚙️ Ajustes</button>
 </nav>
 
 <main>
@@ -252,6 +256,19 @@
   </table>
 </section>
 
+<!-- ================= AJUSTES ================= -->
+<section id="tab-ajustes" class="oculto">
+  <h2>⚙️ Ajustes · Sincronización en la nube</h2>
+  <div class="aviso-min">Para que varios equipos compartan el mismo inventario, socios y ventas, despliega <code>apps-script/Code.gs</code> como Web App en Google Apps Script (ver README) y pega aquí la URL y el token. Mientras no se configure, el POS sigue funcionando solo con el navegador local, igual que antes.</div>
+  <div class="form-linea">
+    <div style="flex:2"><label>URL del Web App (Apps Script)</label><input type="text" id="cfgApiUrl" placeholder="https://script.google.com/macros/s/AKfycb.../exec"></div>
+    <div><label>Token</label><input type="text" id="cfgApiToken" placeholder="token secreto"></div>
+    <div><button class="btn btn-verde btn-chico" onclick="guardarConfigApi()">Guardar</button></div>
+  </div>
+  <div class="aviso-min" id="estadoSync" style="margin-top:8px"></div>
+  <div style="margin-top:8px"><button class="btn btn-gris btn-chico" onclick="sincronizarDesdeNube()">🔄 Sincronizar ahora</button></div>
+</section>
+
 </main>
 
 <div id="modalZona"></div>
@@ -303,11 +320,92 @@ let carrito = {}; // id -> cantidad
 function cargar(){
   try{
     const d = JSON.parse(localStorage.getItem(CLAVE));
-    if(d && d.productos){ d.config = d.config || {urlDocs:''}; return d; }
+    if(d && d.productos){ d.config = d.config || {}; d.config.urlDocs = d.config.urlDocs || ''; d.config.apiUrl = d.config.apiUrl || ''; d.config.apiToken = d.config.apiToken || ''; return d; }
   }catch(e){}
-  return {productos: JSON.parse(JSON.stringify(PRODUCTOS_INICIALES)), socios: [], ventas: [], config:{urlDocs:''}};
+  return {productos: JSON.parse(JSON.stringify(PRODUCTOS_INICIALES)), socios: [], ventas: [], config:{urlDocs:'', apiUrl:'', apiToken:''}};
 }
-function guardar(){ localStorage.setItem(CLAVE, JSON.stringify(db)); }
+function guardar(){ localStorage.setItem(CLAVE, JSON.stringify(db)); guardarEnNube(); }
+
+// ========== Sync remoto (Google Apps Script + Drive) ==========
+let guardarNubeTimeout = null;
+
+function apiConfigurada(){
+  return !!(db.config && db.config.apiUrl && db.config.apiToken);
+}
+
+async function apiLlamar(action, data){
+  const cuerpo = { action, token: db.config.apiToken };
+  if(data !== undefined) cuerpo.data = data;
+  const res = await fetch(db.config.apiUrl, {
+    method: 'POST',
+    headers: {'Content-Type': 'text/plain;charset=utf-8'}, // evita preflight CORS en Apps Script
+    body: JSON.stringify(cuerpo)
+  });
+  const json = await res.json();
+  if(!json.ok) throw new Error(json.error || 'Error de servidor');
+  return json.data;
+}
+
+function marcarEstadoSync(estado){
+  const textos = {
+    sincronizando: '🔄 Sincronizando…',
+    ok: '☁️ Sincronizado',
+    error: '⚠️ Sin conexión con la nube (usando datos guardados en este equipo)',
+    apagado: ''
+  };
+  const txt = textos[estado] || '';
+  const el1 = $('estadoSync'); if(el1) el1.textContent = txt;
+  const el2 = $('estadoSyncHeader'); if(el2) el2.textContent = txt ? ' · ' + txt : '';
+}
+
+function repintarTodo(){
+  pintarCatalogo(); pintarCarrito(); pintarSelSocio();
+  if(!$('tab-inventario').classList.contains('oculto')) pintarInventario();
+  if(!$('tab-socios').classList.contains('oculto')) pintarSocios();
+  if(!$('tab-reportes').classList.contains('oculto')) pintarReportes();
+  if(!$('tab-historial').classList.contains('oculto')) pintarHistorial();
+}
+
+async function sincronizarDesdeNube(){
+  if(!apiConfigurada()){ marcarEstadoSync('apagado'); return; }
+  marcarEstadoSync('sincronizando');
+  try{
+    const remoto = await apiLlamar('get');
+    if(remoto && remoto.productos){
+      const configLocal = db.config;
+      db = remoto;
+      db.config = configLocal; // conservamos apiUrl/token/urlDocs de este equipo
+      localStorage.setItem(CLAVE, JSON.stringify(db));
+      repintarTodo();
+    }
+    marcarEstadoSync('ok');
+  }catch(e){
+    marcarEstadoSync('error');
+  }
+}
+
+function guardarEnNube(){
+  if(!apiConfigurada()) return;
+  clearTimeout(guardarNubeTimeout);
+  guardarNubeTimeout = setTimeout(async ()=>{
+    marcarEstadoSync('sincronizando');
+    try{
+      await apiLlamar('save', db);
+      marcarEstadoSync('ok');
+    }catch(e){
+      marcarEstadoSync('error');
+    }
+  }, 800);
+}
+
+function guardarConfigApi(){
+  db.config = db.config || {};
+  db.config.apiUrl = $('cfgApiUrl').value.trim();
+  db.config.apiToken = $('cfgApiToken').value.trim();
+  localStorage.setItem(CLAVE, JSON.stringify(db));
+  toast('⚙️ Configuración guardada');
+  sincronizarDesdeNube();
+}
 
 // ========== Utilidades ==========
 const $ = id => document.getElementById(id);
@@ -322,11 +420,15 @@ function esc(s){ return String(s).replace(/[<>&"]/g, c=>({'<':'&lt;','>':'&gt;',
 // ========== Navegación ==========
 function irTab(tab){
   document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('activo', b.dataset.tab===tab));
-  ['caja','inventario','socios','reportes','historial'].forEach(t=>$('tab-'+t).classList.toggle('oculto', t!==tab));
+  ['caja','inventario','socios','reportes','historial','ajustes'].forEach(t=>$('tab-'+t).classList.toggle('oculto', t!==tab));
   if(tab==='inventario') pintarInventario();
   if(tab==='socios') pintarSocios();
   if(tab==='reportes') pintarReportes();
   if(tab==='historial') pintarHistorial();
+  if(tab==='ajustes'){
+    $('cfgApiUrl').value = (db.config && db.config.apiUrl) || '';
+    $('cfgApiToken').value = (db.config && db.config.apiToken) || '';
+  }
 }
 
 // ========== Catálogo / Caja ==========
@@ -991,6 +1093,7 @@ function anular(n){
 // ========== Inicio ==========
 $('fechaHoy').textContent = new Date().toLocaleDateString('es-CL',{weekday:'long', day:'numeric', month:'long', year:'numeric'});
 pintarCatalogo(); pintarCarrito(); pintarSelSocio();
+sincronizarDesdeNube();
 </script>
 </body>
 </html>
